@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply min-h-screen bg-base-200 text-base-content font-sans;
+}
+
+.app-shell {
+  background-image: radial-gradient(circle at top, rgba(30, 110, 110, 0.08), transparent 55%),
+    radial-gradient(circle at 20% 70%, rgba(217, 137, 67, 0.15), transparent 45%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(247, 247, 247, 0.8));
+}
