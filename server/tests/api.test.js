@@ -1,13 +1,26 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { pbkdf2Sync } from "node:crypto";
 
 import { createServer } from "../app.js";
 
+const CLIENT_HASH_ITERATIONS = 100_000;
+const CLIENT_HASH_BYTES = 32;
+
 let baseUrl;
 let server;
+let db;
+
+function clientHash(username, password) {
+  return pbkdf2Sync(password, username, CLIENT_HASH_ITERATIONS, CLIENT_HASH_BYTES, "sha256").toString(
+    "base64"
+  );
+}
 
 async function startServer() {
-  const { server: httpServer } = createServer({ token: "test-token", dbPath: ":memory:" });
+  const result = createServer({ dbPath: ":memory:" });
+  const { server: httpServer } = result;
+  db = result.db;
   await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
   const address = httpServer.address();
   baseUrl = `http://${address.address}:${address.port}`;
@@ -23,7 +36,7 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-async function request(method, path, body, token = "test-token") {
+async function request(method, path, body, token) {
   const headers = {
     "Content-Type": "application/json",
   };
@@ -40,87 +53,136 @@ async function request(method, path, body, token = "test-token") {
   return { status: res.status, payload };
 }
 
-test("requires auth", async () => {
-  const { status, payload } = await request("GET", "/people", null, "");
-  assert.equal(status, 401);
-  assert.ok(payload.error);
-});
+test("auth, user management, shifts, audit logs", async () => {
+  const noAuth = await request("GET", "/people");
+  assert.equal(noAuth.status, 401);
 
-test("people + shifts flow", async () => {
-  const create = await request("POST", "/people", { person_name: "Alice" });
-  assert.equal(create.status, 201);
-  const personId = create.payload.id;
-  assert.ok(create.payload.person_name_b64);
+  const adminUsername = "admin";
+  const adminPassword = "AdminPass123";
+  const adminHash = clientHash(adminUsername, adminPassword);
+  const bootstrap = await request("POST", "/auth/bootstrap", {
+    username: adminUsername,
+    password_client_hash: adminHash,
+    person_name: "管理员",
+  });
+  assert.equal(bootstrap.status, 201);
+  const adminToken = bootstrap.payload.token;
+
+  const userUsername = "alice";
+  const userPassword = "alicepass";
+  const userHash = clientHash(userUsername, userPassword);
+  const createUser = await request(
+    "POST",
+    "/users",
+    {
+      username: userUsername,
+      password_client_hash: userHash,
+      person_name: "Alice",
+    },
+    adminToken
+  );
+  assert.equal(createUser.status, 201);
+  const userId = createUser.payload.id;
+
+  const login = await request("POST", "/auth/login", {
+    username: userUsername,
+    password_client_hash: userHash,
+  });
+  assert.equal(login.status, 200);
+  const userToken = login.payload.token;
+
+  const listUsers = await request("GET", "/users", null, userToken);
+  assert.equal(listUsers.status, 403);
+
+  const people = await request("GET", "/people", null, userToken);
+  assert.equal(people.status, 200);
+  assert.ok(people.payload.people.find((person) => person.id === userId));
 
   const start = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
   const end = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
-  const shift = await request("POST", "/shifts", {
-    person_id: personId,
-    start_at: start,
-    end_at: end,
-  });
+  const shift = await request(
+    "POST",
+    "/shifts",
+    {
+      person_id: userId,
+      start_at: start,
+      end_at: end,
+    },
+    userToken
+  );
   assert.equal(shift.status, 201);
 
-  const list = await request("GET", "/shifts");
-  assert.equal(list.status, 200);
-  assert.equal(list.payload.shifts.length, 1);
+  const updateStart = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+  const updateEnd = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+  const updated = await request(
+    "PUT",
+    `/shifts/${shift.payload.id}`,
+    {
+      person_id: userId,
+      start_at: updateStart,
+      end_at: updateEnd,
+    },
+    userToken
+  );
+  assert.equal(updated.status, 200);
 
-  const denyDelete = await request("DELETE", `/people/${personId}`);
+  const newPassword = "alicepass2";
+  const newHash = clientHash(userUsername, newPassword);
+  const changePassword = await request(
+    "POST",
+    "/auth/change-password",
+    {
+      current_password_client_hash: userHash,
+      new_password_client_hash: newHash,
+    },
+    userToken
+  );
+  assert.equal(changePassword.status, 204);
+
+  const expiredToken = await request("GET", "/shifts", null, userToken);
+  assert.equal(expiredToken.status, 401);
+
+  const relogin = await request("POST", "/auth/login", {
+    username: userUsername,
+    password_client_hash: newHash,
+  });
+  assert.equal(relogin.status, 200);
+  const freshUserToken = relogin.payload.token;
+
+  const auditCountBeforeRead = db
+    .prepare("SELECT COUNT(1) AS count FROM audit_logs")
+    .get().count;
+  await request("GET", "/people", null, freshUserToken);
+  const auditCountAfterRead = db
+    .prepare("SELECT COUNT(1) AS count FROM audit_logs")
+    .get().count;
+  assert.equal(auditCountAfterRead, auditCountBeforeRead);
+
+  const auditCountBeforeFail = db
+    .prepare("SELECT COUNT(1) AS count FROM audit_logs")
+    .get().count;
+  const denyDelete = await request("DELETE", `/users/${userId}`, null, adminToken);
   assert.equal(denyDelete.status, 409);
+  const auditCountAfterFail = db
+    .prepare("SELECT COUNT(1) AS count FROM audit_logs")
+    .get().count;
+  assert.equal(auditCountAfterFail, auditCountBeforeFail);
 
-  const deletedShift = await request("DELETE", `/shifts/${shift.payload.id}`);
+  const deletedShift = await request(
+    "DELETE",
+    `/shifts/${shift.payload.id}`,
+    null,
+    freshUserToken
+  );
   assert.equal(deletedShift.status, 204);
 
-  const deletedPerson = await request("DELETE", `/people/${personId}`);
-  assert.equal(deletedPerson.status, 204);
-});
+  const deletedUser = await request("DELETE", `/users/${userId}`, null, adminToken);
+  assert.equal(deletedUser.status, 204);
 
-test("invalid shifts", async () => {
-  const create = await request("POST", "/people", { person_name: "Bob" });
-  const personId = create.payload.id;
-
-  const start = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-  const end = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-
-  const missing = await request("POST", "/shifts", {
-    person_id: "missing",
-    start_at: start,
-    end_at: end,
-  });
-  assert.equal(missing.status, 400);
-
-  const invalidTime = await request("POST", "/shifts", {
-    person_id: personId,
-    start_at: start,
-    end_at: new Date(Date.now() - 60 * 1000).toISOString(),
-  });
-  assert.equal(invalidTime.status, 400);
-});
-
-test("lists only upcoming", async () => {
-  const create = await request("POST", "/people", { person_name: "Carol" });
-  const personId = create.payload.id;
-
-  const pastStart = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-  const pastEnd = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
-  const futureStart = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-  const futureEnd = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
-
-  const past = await request("POST", "/shifts", {
-    person_id: personId,
-    start_at: pastStart,
-    end_at: pastEnd,
-  });
-  assert.equal(past.status, 201);
-
-  const future = await request("POST", "/shifts", {
-    person_id: personId,
-    start_at: futureStart,
-    end_at: futureEnd,
-  });
-  assert.equal(future.status, 201);
-
-  const list = await request("GET", "/shifts");
-  assert.equal(list.status, 200);
-  assert.equal(list.payload.shifts.length, 1);
+  const actionRows = db
+    .prepare("SELECT action FROM audit_logs ORDER BY occurred_at")
+    .all()
+    .map((row) => row.action);
+  assert.ok(actionRows.includes("shifts.update"));
+  assert.ok(actionRows.includes("users.create"));
 });

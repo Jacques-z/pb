@@ -18,22 +18,32 @@ type Shift = {
 
 type Config = {
   serverUrl: string;
-  apiToken: string;
+  username: string;
+  token: string;
   refreshMinutes: number;
 };
 
 const DEFAULTS: Config = {
   serverUrl: "http://127.0.0.1:8787",
-  apiToken: "dev-token",
+  username: "",
+  token: "",
   refreshMinutes: 1,
 };
 
+const CLIENT_HASH_ITERATIONS = 100_000;
+const CLIENT_HASH_BYTES = 32;
+
 const config = reactive<Config>({ ...DEFAULTS });
+const loginForm = reactive({
+  username: "",
+  password: "",
+});
 const shifts = ref<Shift[]>([]);
-const status = ref("未连接");
+const status = ref("未登录");
 const lastUpdated = ref("--");
 const notificationReady = ref(false);
 const refreshError = ref<string | null>(null);
+const loginBusy = ref(false);
 
 const reminderLeadMs = 15 * 60 * 1000;
 const reminderTimers = new Map<string, number>();
@@ -41,6 +51,7 @@ const reminderSchedule = new Map<string, number>();
 let refreshTimer: number | null = null;
 
 const upcomingCount = computed(() => shifts.value.length);
+const loggedIn = computed(() => Boolean(config.token));
 
 function loadConfig() {
   const raw = localStorage.getItem("shiftdesk.config");
@@ -51,19 +62,20 @@ function loadConfig() {
   try {
     const parsed = JSON.parse(raw) as Partial<Config>;
     config.serverUrl = parsed.serverUrl || DEFAULTS.serverUrl;
-    config.apiToken = parsed.apiToken || DEFAULTS.apiToken;
+    config.username = parsed.username || DEFAULTS.username;
+    config.token = parsed.token || DEFAULTS.token;
     config.refreshMinutes = parsed.refreshMinutes || DEFAULTS.refreshMinutes;
+    loginForm.username = config.username;
   } catch {
     Object.assign(config, DEFAULTS);
   }
 }
 
-function saveConfig() {
+function persistConfig() {
   const minutes = Math.max(1, Math.floor(config.refreshMinutes || DEFAULTS.refreshMinutes));
   config.refreshMinutes = minutes;
   localStorage.setItem("shiftdesk.config", JSON.stringify(config));
   scheduleRefresh();
-  fetchShifts();
 }
 
 function setStatus(next: string, error?: string | null) {
@@ -86,6 +98,39 @@ function formatTime(value: string) {
   return date.toLocaleString();
 }
 
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary);
+}
+
+async function hashPassword(username: string, password: string) {
+  if (!window.crypto?.subtle) {
+    throw new Error("浏览器不支持加密接口");
+  }
+  const encoder = new TextEncoder();
+  const keyMaterial = await window.crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
+  const derived = await window.crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode(username),
+      iterations: CLIENT_HASH_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    CLIENT_HASH_BYTES * 8
+  );
+  return bytesToBase64(new Uint8Array(derived));
+}
+
 async function ensureNotifications() {
   const granted = await isPermissionGranted();
   if (granted) {
@@ -96,18 +141,77 @@ async function ensureNotifications() {
   notificationReady.value = permission === "granted";
 }
 
+async function login() {
+  if (!config.serverUrl || !loginForm.username || !loginForm.password) {
+    setStatus("缺少配置", "请填写服务端地址、用户名与密码");
+    return;
+  }
+  loginBusy.value = true;
+  setStatus("登录中...");
+  try {
+    const passwordClientHash = await hashPassword(loginForm.username, loginForm.password);
+    const resp = await fetch(`${config.serverUrl.replace(/\/$/, "")}/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        username: loginForm.username,
+        password_client_hash: passwordClientHash,
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body?.error || `登录失败 (${resp.status})`);
+    }
+    const payload = await resp.json();
+    config.username = loginForm.username;
+    config.token = payload.token;
+    loginForm.password = "";
+    persistConfig();
+    scheduleRefresh();
+    setStatus("已登录");
+    await fetchShifts();
+  } catch (err) {
+    setStatus("登录失败", err instanceof Error ? err.message : "未知错误");
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+async function logout() {
+  if (config.token && config.serverUrl) {
+    await fetch(`${config.serverUrl.replace(/\/$/, "")}/auth/logout`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+      },
+    }).catch(() => undefined);
+  }
+  config.token = "";
+  persistConfig();
+  shifts.value = [];
+  setStatus("未登录");
+}
+
 async function fetchShifts() {
-  if (!config.serverUrl || !config.apiToken) {
-    setStatus("缺少配置", "请先保存服务端地址与令牌");
+  if (!config.serverUrl || !config.token) {
+    setStatus("未登录", "请先登录以同步班次");
     return;
   }
   setStatus("同步中...");
   try {
     const resp = await fetch(`${config.serverUrl.replace(/\/$/, "")}/shifts`, {
       headers: {
-        Authorization: `Bearer ${config.apiToken}`,
+        Authorization: `Bearer ${config.token}`,
       },
     });
+    if (resp.status === 401) {
+      config.token = "";
+      persistConfig();
+      setStatus("登录失效", "请重新登录");
+      return;
+    }
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
       throw new Error(body?.error || `请求失败 (${resp.status})`);
@@ -115,7 +219,7 @@ async function fetchShifts() {
     const payload = await resp.json();
     shifts.value = payload.shifts || [];
     lastUpdated.value = new Date().toLocaleTimeString();
-    setStatus("已连接");
+    setStatus("已登录");
     syncReminders(shifts.value);
   } catch (err) {
     setStatus("连接失败", err instanceof Error ? err.message : "未知错误");
@@ -219,7 +323,7 @@ onBeforeUnmount(() => {
               <h2 class="card-title">连接配置</h2>
               <span
                 class="badge"
-                :class="status === '已连接' ? 'badge-success' : 'badge-ghost'"
+                :class="loggedIn ? 'badge-success' : 'badge-ghost'"
               >
                 {{ status }}
               </span>
@@ -238,13 +342,24 @@ onBeforeUnmount(() => {
               </label>
               <label class="form-control">
                 <div class="label">
-                  <span class="label-text">接口令牌</span>
+                  <span class="label-text">用户名</span>
                 </div>
                 <input
-                  v-model="config.apiToken"
+                  v-model="loginForm.username"
+                  class="input input-bordered"
+                  type="text"
+                  placeholder="admin"
+                />
+              </label>
+              <label class="form-control">
+                <div class="label">
+                  <span class="label-text">密码</span>
+                </div>
+                <input
+                  v-model="loginForm.password"
                   class="input input-bordered"
                   type="password"
-                  placeholder="dev-token"
+                  placeholder="••••••"
                 />
               </label>
               <label class="form-control">
@@ -267,8 +382,18 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="flex flex-wrap gap-2">
-              <button class="btn btn-primary" @click="saveConfig">保存配置</button>
-              <button class="btn btn-ghost" @click="fetchShifts">立即刷新</button>
+              <button class="btn btn-primary" :disabled="loginBusy" @click="login">
+                {{ loginBusy ? "登录中..." : "登录" }}
+              </button>
+              <button class="btn btn-ghost" @click="logout" :disabled="!loggedIn">
+                退出登录
+              </button>
+              <button class="btn btn-ghost" @click="persistConfig">
+                保存设置
+              </button>
+              <button class="btn btn-ghost" @click="fetchShifts" :disabled="!loggedIn">
+                立即刷新
+              </button>
             </div>
             <div class="text-xs text-base-content/60">
               通知权限：{{ notificationReady ? "已授权" : "未授权" }}
