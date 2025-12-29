@@ -1,0 +1,32 @@
+# schedule-local-reminders Specification
+
+## Purpose
+TBD - created by archiving change add-scheduling-mvp. Update Purpose after archive.
+## Requirements
+### Requirement: 本地通知调度
+客户端 MUST 使用固定提前时间 15 分钟。
+客户端 MUST 基于班次数据，为每个即将到来的班次在 start_at 减去固定提前时间的时刻调度系统本地通知。
+通知 MUST 包含人员姓名（对 person_name_b64 进行 Base64 解码）与开始时间。
+
+#### Scenario: 通知触发
+- **当** 当前时间到达某个班次的 start_at 减去 15 分钟
+- **则** 系统显示该班次的本地通知
+
+### Requirement: 变更时的提醒更新
+当班次数据发生变化时，客户端 MUST 为更新的班次重新调度提醒，并为删除的班次取消提醒。
+
+#### Scenario: 班次时间更新
+- **当** 服务端班次开始时间变更且客户端完成同步
+- **则** 之前的提醒被替换为新的时间
+
+#### Scenario: 班次被删除
+- **当** 服务端删除班次且客户端完成同步
+- **则** 该班次的待触发提醒被取消
+
+### Requirement: 后台提醒交付
+客户端 MUST 在主窗口关闭后仍在后台运行并交付提醒，直到用户显式退出应用。
+
+#### Scenario: 关闭主窗口
+- **当** 用户关闭主窗口
+- **则** 应用继续运行且提醒仍会触发
+
