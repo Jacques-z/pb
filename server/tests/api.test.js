@@ -57,6 +57,9 @@ test("auth, user management, shifts, audit logs", async () => {
   const noAuth = await request("GET", "/people");
   assert.equal(noAuth.status, 401);
 
+  const noAuthLogs = await request("GET", "/audit-logs");
+  assert.equal(noAuthLogs.status, 401);
+
   const adminUsername = "admin";
   const adminPassword = "AdminPass123";
   const adminHash = clientHash(adminUsername, adminPassword);
@@ -90,6 +93,14 @@ test("auth, user management, shifts, audit logs", async () => {
   });
   assert.equal(login.status, 200);
   const userToken = login.payload.token;
+
+  const userLogs = await request("GET", "/audit-logs", null, userToken);
+  assert.equal(userLogs.status, 403);
+
+  const adminLogs = await request("GET", "/audit-logs?limit=1", null, adminToken);
+  assert.equal(adminLogs.status, 200);
+  assert.ok(Array.isArray(adminLogs.payload.logs));
+  assert.ok(adminLogs.payload.logs.length <= 1);
 
   const listUsers = await request("GET", "/users", null, userToken);
   assert.equal(listUsers.status, 403);

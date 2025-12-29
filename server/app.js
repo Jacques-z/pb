@@ -188,6 +188,27 @@ function listShifts(db) {
   return stmt.all(Date.now());
 }
 
+function listAuditLogs(db, limit) {
+  const stmt = db.prepare(`
+    SELECT id, occurred_at, actor_user_id, actor_username, action, resource_type, resource_id, request_method, request_path, status_code
+    FROM audit_logs
+    ORDER BY occurred_at DESC
+    LIMIT ?
+  `);
+  return stmt.all(limit);
+}
+
+function parseLimit(value, defaultLimit, maxLimit) {
+  if (value == null) {
+    return { value: defaultLimit, error: null };
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { value: null, error: "limit must be a positive integer" };
+  }
+  return { value: Math.min(parsed, maxLimit), error: null };
+}
+
 function hashServerPassword(passwordClientHash, saltB64) {
   const salt = Buffer.from(saltB64, "base64");
   return pbkdf2Sync(
@@ -707,6 +728,23 @@ async function handleRequest(req, res, state) {
       }
       return;
     }
+  }
+
+  if (req.method === "GET" && parts.length === 1 && parts[0] === "audit-logs") {
+    if (!requireAdmin(session.user, res)) {
+      return;
+    }
+    const { value: limit, error } = parseLimit(
+      url.searchParams.get("limit"),
+      100,
+      500
+    );
+    if (error) {
+      sendJson(res, 400, { error });
+      return;
+    }
+    sendJson(res, 200, { logs: listAuditLogs(state.db, limit) });
+    return;
   }
 
   if (req.method === "GET" && parts.length === 1 && parts[0] === "shifts") {
