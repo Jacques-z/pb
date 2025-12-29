@@ -1,9 +1,17 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { Person, Shift } from "../lib/types";
-import { decodeName, formatTime, shortId, toLocalDateTimeParts, parseLocalDateTime } from "../lib/format";
+import {
+  decodeName,
+  formatTime,
+  shortId,
+  toLocalDateTimeParts,
+  parseLocalDateTime,
+} from "../lib/format";
 
 const props = defineProps<{
   shifts: Shift[];
+  calendarShifts: Shift[];
   people: Person[];
   shiftForm: {
     id: string;
@@ -17,6 +25,9 @@ const props = defineProps<{
   shiftMessage: string | null;
   shiftBusy: boolean;
   peopleBusy: boolean;
+  calendarBusy: boolean;
+  calendarError: string | null;
+  calendarMessage: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -26,9 +37,220 @@ const emit = defineEmits<{
   (event: "resetShiftForm"): void;
   (event: "editShift", shift: Shift): void;
   (event: "removeShift", shift: Shift): void;
+  (event: "calendarRangeChange", range: { start_at: string; end_at: string }): void;
+  (event: "calendarSubmit", payload: { id?: string; person_id: string; start_at: string; end_at: string }): void;
 }>();
 
+type ViewMode = "list" | "day" | "week" | "month";
+
 const shiftForm = props.shiftForm;
+const viewMode = ref<ViewMode>("list");
+const anchorDate = ref(new Date());
+const filterEnabled = ref(false);
+const filterPersonId = ref("");
+const selectedDayIndex = ref(0);
+const calendarLocalError = ref<string | null>(null);
+const calendarLocalMessage = ref<string | null>(null);
+const dayColumnRefs = ref<HTMLElement[]>([]);
+const shiftOverrides = reactive(new Map<string, { start: Date; end: Date }>());
+
+const draft = reactive({
+  active: false,
+  dayIndex: 0,
+  person_id: "",
+  start: new Date(),
+  end: new Date(),
+});
+
+const dragState = ref<{
+  type: "start" | "end";
+  shiftId: string | null;
+  dayIndex: number;
+  person_id: string;
+  originalStart: Date;
+  originalEnd: Date;
+} | null>(null);
+
+const HOUR_HEIGHT = 48;
+const MINUTE_STEP = 15;
+const MIN_DURATION = 15;
+
+const hours = Array.from({ length: 24 }, (_, i) => i);
+
+const viewDays = computed(() => {
+  if (viewMode.value === "day") {
+    return [startOfDay(anchorDate.value)];
+  }
+  if (viewMode.value === "week") {
+    const start = startOfWeek(anchorDate.value);
+    return Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  }
+  return [] as Date[];
+});
+
+const viewRange = computed(() => {
+  if (viewMode.value === "day") {
+    const start = startOfDay(anchorDate.value);
+    return { start, end: endOfDay(anchorDate.value) };
+  }
+  if (viewMode.value === "week") {
+    const start = startOfWeek(anchorDate.value);
+    return { start, end: endOfDay(addDays(start, 6)) };
+  }
+  if (viewMode.value === "month") {
+    const start = startOfMonth(anchorDate.value);
+    return { start, end: endOfMonth(anchorDate.value) };
+  }
+  return null;
+});
+
+const viewLabel = computed(() => {
+  if (viewMode.value === "day") {
+    return formatDate(anchorDate.value);
+  }
+  if (viewMode.value === "week") {
+    const start = startOfWeek(anchorDate.value);
+    const end = addDays(start, 6);
+    return `${formatDate(start)} ~ ${formatDate(end)}`;
+  }
+  if (viewMode.value === "month") {
+    return `${anchorDate.value.getFullYear()}年${anchorDate.value.getMonth() + 1}月`;
+  }
+  return "列表";
+});
+
+const canCreateDraft = computed(() => {
+  if (viewMode.value === "month" || viewMode.value === "list") {
+    return false;
+  }
+  const range = viewRange.value;
+  if (!range) return false;
+  return range.end.getTime() > Date.now();
+});
+
+const filteredCalendarShifts = computed(() => {
+  if (!filterEnabled.value || !filterPersonId.value) {
+    return props.calendarShifts;
+  }
+  return props.calendarShifts.filter((shift) => shift.person_id === filterPersonId.value);
+});
+
+const monthCells = computed(() => {
+  if (viewMode.value !== "month") return [] as { date: Date | null; inMonth: boolean }[];
+  const start = startOfMonth(anchorDate.value);
+  const startOffset = (start.getDay() + 6) % 7;
+  const cells: { date: Date | null; inMonth: boolean }[] = [];
+  for (let i = 0; i < startOffset; i += 1) {
+    cells.push({ date: null, inMonth: false });
+  }
+  const daysInMonth = endOfMonth(anchorDate.value).getDate();
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push({
+      date: new Date(anchorDate.value.getFullYear(), anchorDate.value.getMonth(), day),
+      inMonth: true,
+    });
+  }
+  while (cells.length % 7 !== 0) {
+    cells.push({ date: null, inMonth: false });
+  }
+  return cells;
+});
+
+const monthShiftMap = computed(() => {
+  const map = new Map<string, Shift[]>();
+  filteredCalendarShifts.value.forEach((shift) => {
+    const key = dateKey(new Date(shift.start_at));
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key)?.push(shift);
+  });
+  return map;
+});
+
+const daySegments = computed(() => {
+  if (viewMode.value !== "day" && viewMode.value !== "week") {
+    return [] as Segment[][];
+  }
+  return viewDays.value.map((day, index) => buildSegmentsForDay(day, index));
+});
+
+const draftSegment = computed(() => {
+  if (!draft.active) return null;
+  const day = viewDays.value[draft.dayIndex];
+  if (!day) return null;
+  const start = clampToDay(draft.start, day);
+  const end = clampToDay(draft.end, day);
+  const segment = buildSegment(day, draft.dayIndex, {
+    id: "draft",
+    person_id: draft.person_id,
+    person_name_b64: "",
+    start_at: start.toISOString(),
+    end_at: end.toISOString(),
+    created_at: "",
+    updated_at: "",
+  });
+  return segment;
+});
+
+watch(
+  [viewMode, anchorDate],
+  () => {
+    if (viewMode.value === "list") return;
+    const range = viewRange.value;
+    if (!range) return;
+    emit("calendarRangeChange", {
+      start_at: range.start.toISOString(),
+      end_at: range.end.toISOString(),
+    });
+  },
+  { immediate: true }
+);
+
+watch(viewMode, (mode) => {
+  if (mode === "list" || mode === "month") {
+    clearDraft();
+  }
+  selectedDayIndex.value = 0;
+  if (mode !== "list" && !props.people.length) {
+    emit("refreshPeople");
+  }
+});
+
+watch(
+  viewDays,
+  (days) => {
+    if (!draft.active) return;
+    if (viewMode.value === "list" || viewMode.value === "month") return;
+    const day = days[draft.dayIndex];
+    if (!day) {
+      cancelDraftWithError("草稿已失效，请重新创建");
+      return;
+    }
+    moveDraftToDay(day);
+  },
+  { flush: "post" }
+);
+
+watch(
+  () => props.people.map((person) => person.id).join(","),
+  () => {
+    if (filterEnabled.value && props.people.length) {
+      if (!props.people.some((person) => person.id === filterPersonId.value)) {
+        filterPersonId.value = props.people[0].id;
+      }
+    }
+  }
+);
+
+watch(filterEnabled, (enabled) => {
+  if (enabled && !filterPersonId.value && props.people.length) {
+    filterPersonId.value = props.people[0].id;
+  }
+  if (!enabled) {
+    filterPersonId.value = "";
+  }
+});
 
 function setStartNow() {
   const parts = toLocalDateTimeParts(new Date().toISOString());
@@ -54,17 +276,575 @@ function setEndFromStart(hours: number) {
   shiftForm.end_date = parts.date;
   shiftForm.end_time = parts.time;
 }
+
+function formatDate(date: Date) {
+  return date.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function dateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatTimeOnly(value: string | Date) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function endOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function startOfWeek(date: Date) {
+  const base = startOfDay(date);
+  const day = base.getDay();
+  const diff = (day + 6) % 7;
+  return addDays(base, -diff);
+}
+
+function startOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function endOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function isSameDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function clearDraft() {
+  draft.active = false;
+  calendarLocalError.value = null;
+  calendarLocalMessage.value = null;
+}
+
+function cancelDraftWithError(message: string) {
+  draft.active = false;
+  calendarLocalError.value = message;
+  calendarLocalMessage.value = null;
+}
+
+function refreshCurrentView() {
+  calendarLocalError.value = null;
+  calendarLocalMessage.value = null;
+  if (viewMode.value === "list") {
+    emit("refreshShifts");
+    return;
+  }
+  const range = viewRange.value;
+  if (!range) return;
+  emit("calendarRangeChange", {
+    start_at: range.start.toISOString(),
+    end_at: range.end.toISOString(),
+  });
+}
+
+function goPrev() {
+  if (viewMode.value === "day") {
+    anchorDate.value = addDays(anchorDate.value, -1);
+    return;
+  }
+  if (viewMode.value === "week") {
+    anchorDate.value = addDays(anchorDate.value, -7);
+    return;
+  }
+  if (viewMode.value === "month") {
+    anchorDate.value = new Date(anchorDate.value.getFullYear(), anchorDate.value.getMonth() - 1, 1);
+  }
+}
+
+function goNext() {
+  if (viewMode.value === "day") {
+    anchorDate.value = addDays(anchorDate.value, 1);
+    return;
+  }
+  if (viewMode.value === "week") {
+    anchorDate.value = addDays(anchorDate.value, 7);
+    return;
+  }
+  if (viewMode.value === "month") {
+    anchorDate.value = new Date(anchorDate.value.getFullYear(), anchorDate.value.getMonth() + 1, 1);
+  }
+}
+
+function goToday() {
+  anchorDate.value = new Date();
+}
+
+function selectDay(index: number) {
+  selectedDayIndex.value = index;
+  if (draft.active) {
+    const day = viewDays.value[index];
+    if (!day) return;
+    if (!moveDraftToDay(day)) {
+      return;
+    }
+    draft.dayIndex = index;
+  }
+}
+
+function clampToDay(value: Date, day: Date) {
+  const start = startOfDay(day).getTime();
+  const end = addDays(startOfDay(day), 1).getTime();
+  const clamped = Math.min(Math.max(value.getTime(), start), end);
+  return new Date(clamped);
+}
+
+function roundToStep(date: Date) {
+  const stepMs = MINUTE_STEP * 60 * 1000;
+  const rounded = Math.ceil(date.getTime() / stepMs) * stepMs;
+  return new Date(rounded);
+}
+
+function applyTimeToDay(day: Date, source: Date) {
+  return new Date(
+    day.getFullYear(),
+    day.getMonth(),
+    day.getDate(),
+    source.getHours(),
+    source.getMinutes(),
+    0,
+    0
+  );
+}
+
+function moveDraftToDay(day: Date) {
+  const dayStart = startOfDay(day);
+  const dayEnd = addDays(dayStart, 1);
+  const now = new Date();
+  if (dayEnd <= now) {
+    cancelDraftWithError("过去时间段只读，草稿已取消");
+    return false;
+  }
+  const durationMs = Math.max(
+    draft.end.getTime() - draft.start.getTime(),
+    MIN_DURATION * 60 * 1000
+  );
+  let start = applyTimeToDay(day, draft.start);
+  const minStart = addMinutes(dayStart, getMinNowMinutes(dayStart));
+  const maxStart = addMinutes(dayStart, 24 * 60 - MIN_DURATION);
+  if (start < minStart) {
+    start = minStart;
+  }
+  if (start > maxStart) {
+    cancelDraftWithError("过去时间段只读，草稿已取消");
+    return false;
+  }
+  let end = new Date(start.getTime() + durationMs);
+  if (end > dayEnd) {
+    end = dayEnd;
+    const minEnd = new Date(start.getTime() + MIN_DURATION * 60 * 1000);
+    if (end < minEnd) {
+      const adjustedStart = new Date(dayEnd.getTime() - MIN_DURATION * 60 * 1000);
+      if (adjustedStart < minStart) {
+        cancelDraftWithError("过去时间段只读，草稿已取消");
+        return false;
+      }
+      start = adjustedStart;
+      end = dayEnd;
+    }
+  }
+  draft.start = start;
+  draft.end = end;
+  return true;
+}
+
+function createDraft() {
+  calendarLocalError.value = null;
+  calendarLocalMessage.value = null;
+  if (!props.people.length) {
+    calendarLocalError.value = "暂无可用人员，请先创建用户";
+    return;
+  }
+  if (!canCreateDraft.value || viewMode.value === "list" || viewMode.value === "month") {
+    calendarLocalError.value = "当前视图不可新建班次";
+    return;
+  }
+  const days = viewDays.value;
+  const dayIndex = Math.min(selectedDayIndex.value, days.length - 1);
+  const day = days[dayIndex];
+  if (!day) return;
+  const dayStart = startOfDay(day);
+  const dayEnd = addDays(dayStart, 1);
+  const now = new Date();
+  if (dayEnd <= now) {
+    calendarLocalError.value = "过去时间段只读";
+    return;
+  }
+  let start = dayStart;
+  if (now > dayStart && now < dayEnd) {
+    start = roundToStep(now);
+  } else {
+    start = new Date(dayStart.getTime() + 9 * 60 * 60 * 1000);
+  }
+  if (start >= dayEnd) {
+    calendarLocalError.value = "该日期已过期";
+    return;
+  }
+  let end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  if (end > dayEnd) {
+    const minEnd = new Date(start.getTime() + MIN_DURATION * 60 * 1000);
+    end = minEnd > dayEnd ? dayEnd : minEnd;
+  }
+  const defaultPerson = filterEnabled.value && filterPersonId.value ? filterPersonId.value : props.people[0].id;
+  draft.active = true;
+  draft.dayIndex = dayIndex;
+  draft.person_id = defaultPerson;
+  draft.start = start;
+  draft.end = end;
+  calendarLocalMessage.value = "草稿已生成，拖动端点调整后保存";
+}
+
+function cancelDraft() {
+  clearDraft();
+}
+
+function saveDraft() {
+  if (!draft.active) return;
+  if (!draft.person_id) {
+    calendarLocalError.value = "请选择人员";
+    return;
+  }
+  if (draft.end <= draft.start) {
+    calendarLocalError.value = "结束时间必须晚于开始时间";
+    return;
+  }
+  emit("calendarSubmit", {
+    person_id: draft.person_id,
+    start_at: draft.start.toISOString(),
+    end_at: draft.end.toISOString(),
+  });
+  draft.active = false;
+  calendarLocalMessage.value = "已提交创建请求";
+}
+
+function cycleDraftPerson(event: WheelEvent) {
+  if (!props.people.length) return;
+  const delta = Math.sign(event.deltaY);
+  if (delta === 0) return;
+  const list = props.people;
+  const currentIndex = list.findIndex((person) => person.id === draft.person_id);
+  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + delta + list.length) % list.length;
+  draft.person_id = list[nextIndex].id;
+}
+
+function startDrag(event: MouseEvent, segment: Segment, edge: "start" | "end") {
+  if (!segment.editable) return;
+  event.preventDefault();
+  dragState.value = {
+    type: edge,
+    shiftId: segment.shift.id,
+    dayIndex: segment.dayIndex,
+    person_id: segment.shift.person_id,
+    originalStart: new Date(segment.shift.start_at),
+    originalEnd: new Date(segment.shift.end_at),
+  };
+  window.addEventListener("mousemove", onDragMove);
+  window.addEventListener("mouseup", onDragEnd);
+}
+
+function startDraftDrag(event: MouseEvent, edge: "start" | "end") {
+  event.preventDefault();
+  if (!draft.active) return;
+  dragState.value = {
+    type: edge,
+    shiftId: null,
+    dayIndex: draft.dayIndex,
+    person_id: draft.person_id,
+    originalStart: new Date(draft.start),
+    originalEnd: new Date(draft.end),
+  };
+  window.addEventListener("mousemove", onDragMove);
+  window.addEventListener("mouseup", onDragEnd);
+}
+
+function onDragMove(event: MouseEvent) {
+  const state = dragState.value;
+  if (!state) return;
+  const minutes = getMinutesFromEvent(event, state.dayIndex);
+  if (minutes == null) return;
+  if (state.shiftId) {
+    const shift = filteredCalendarShifts.value.find((item) => item.id === state.shiftId);
+    if (!shift) return;
+    const next = applyMinutesToShift(shift, state.dayIndex, minutes, state.type);
+    if (!next) return;
+    shiftOverrides.set(shift.id, next);
+  } else {
+    const next = applyMinutesToDraft(state.dayIndex, minutes, state.type);
+    if (!next) return;
+    draft.start = next.start;
+    draft.end = next.end;
+  }
+}
+
+function onDragEnd() {
+  const state = dragState.value;
+  if (!state) return;
+  window.removeEventListener("mousemove", onDragMove);
+  window.removeEventListener("mouseup", onDragEnd);
+  if (state.shiftId) {
+    const override = shiftOverrides.get(state.shiftId);
+    if (override) {
+      const changed =
+        override.start.getTime() !== state.originalStart.getTime() ||
+        override.end.getTime() !== state.originalEnd.getTime();
+      if (changed) {
+        emit("calendarSubmit", {
+          id: state.shiftId,
+          person_id: state.person_id,
+          start_at: override.start.toISOString(),
+          end_at: override.end.toISOString(),
+        });
+      }
+      shiftOverrides.delete(state.shiftId);
+    }
+  }
+  dragState.value = null;
+}
+
+function getMinutesFromEvent(event: MouseEvent, dayIndex: number) {
+  const column = dayColumnRefs.value[dayIndex];
+  if (!column) return null;
+  const rect = column.getBoundingClientRect();
+  const offsetY = Math.min(Math.max(event.clientY - rect.top, 0), rect.height);
+  const rawMinutes = (offsetY / rect.height) * 24 * 60;
+  const snapped = Math.round(rawMinutes / MINUTE_STEP) * MINUTE_STEP;
+  return Math.min(24 * 60, Math.max(0, snapped));
+}
+
+function applyMinutesToDraft(dayIndex: number, minutes: number, edge: "start" | "end") {
+  const day = viewDays.value[dayIndex];
+  if (!day) return null;
+  const dayStart = startOfDay(day);
+  const minNow = getMinNowMinutes(dayStart);
+  let start = new Date(draft.start);
+  let end = new Date(draft.end);
+  if (edge === "start") {
+    const nextMinutes = Math.max(minutes, minNow);
+    start = addMinutes(dayStart, nextMinutes);
+    if (end <= start) {
+      end = addMinutes(start, MIN_DURATION);
+    }
+  } else {
+    const nextMinutes = Math.max(minutes, minNow + MIN_DURATION);
+    end = addMinutes(dayStart, nextMinutes);
+    if (end <= start) {
+      start = addMinutes(end, -MIN_DURATION);
+    }
+  }
+  const dayEnd = addDays(dayStart, 1);
+  if (end > dayEnd) {
+    end = dayEnd;
+  }
+  return { start, end };
+}
+
+function applyMinutesToShift(shift: Shift, dayIndex: number, minutes: number, edge: "start" | "end") {
+  const day = viewDays.value[dayIndex];
+  if (!day) return null;
+  const originalStart = new Date(shift.start_at);
+  const originalEnd = new Date(shift.end_at);
+  if (!isSameDay(originalStart, originalEnd)) {
+    return null;
+  }
+  const dayStart = startOfDay(day);
+  const minNow = getMinNowMinutes(dayStart);
+  let start = new Date(originalStart);
+  let end = new Date(originalEnd);
+  if (edge === "start") {
+    const nextMinutes = Math.max(minutes, minNow);
+    start = addMinutes(dayStart, nextMinutes);
+    if (end <= start) {
+      end = addMinutes(start, MIN_DURATION);
+    }
+  } else {
+    const nextMinutes = Math.max(minutes, minNow + MIN_DURATION);
+    end = addMinutes(dayStart, nextMinutes);
+    if (end <= start) {
+      start = addMinutes(end, -MIN_DURATION);
+    }
+  }
+  const dayEnd = addDays(dayStart, 1);
+  if (end > dayEnd) {
+    end = dayEnd;
+  }
+  return { start, end };
+}
+
+function getMinNowMinutes(dayStart: Date) {
+  const now = new Date();
+  if (!isSameDay(now, dayStart)) {
+    return 0;
+  }
+  const diff = now.getTime() - dayStart.getTime();
+  return Math.max(0, Math.ceil(diff / (MINUTE_STEP * 60 * 1000)) * MINUTE_STEP);
+}
+
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function getShiftTimes(shift: Shift) {
+  const override = shiftOverrides.get(shift.id);
+  if (override) {
+    return { start: override.start, end: override.end };
+  }
+  return { start: new Date(shift.start_at), end: new Date(shift.end_at) };
+}
+
+function isEditableShift(shift: Shift) {
+  const { start } = getShiftTimes(shift);
+  if (viewMode.value === "month") return false;
+  if (viewMode.value === "list") return false;
+  return start.getTime() >= Date.now();
+}
+
+type Segment = {
+  shift: Shift;
+  dayIndex: number;
+  top: number;
+  height: number;
+  start: Date;
+  end: Date;
+  editable: boolean;
+};
+
+function buildSegmentsForDay(day: Date, dayIndex: number) {
+  const segments: Segment[] = [];
+  filteredCalendarShifts.value.forEach((shift) => {
+    const { start, end } = getShiftTimes(shift);
+    const dayStart = startOfDay(day);
+    const dayEnd = addDays(dayStart, 1);
+    if (end <= dayStart || start >= dayEnd) {
+      return;
+    }
+    const shiftWithTimes: Shift = {
+      ...shift,
+      start_at: start.toISOString(),
+      end_at: end.toISOString(),
+    };
+    if (!isSameDay(start, end)) {
+      const segmentStart = start < dayStart ? dayStart : start;
+      const segmentEnd = end > dayEnd ? dayEnd : end;
+      const segment = buildSegment(day, dayIndex, {
+        ...shiftWithTimes,
+        start_at: segmentStart.toISOString(),
+        end_at: segmentEnd.toISOString(),
+      });
+      segment.editable = false;
+      segments.push(segment);
+      return;
+    }
+    const segment = buildSegment(day, dayIndex, shiftWithTimes);
+    segment.editable = isEditableShift(shiftWithTimes);
+    segments.push(segment);
+  });
+  return segments;
+}
+
+function buildSegment(day: Date, dayIndex: number, shift: Shift): Segment {
+  const dayStart = startOfDay(day);
+  const start = new Date(shift.start_at);
+  const end = new Date(shift.end_at);
+  const startMinutes = Math.max(0, (start.getTime() - dayStart.getTime()) / 60000);
+  const endMinutes = Math.min(24 * 60, (end.getTime() - dayStart.getTime()) / 60000);
+  const heightMinutes = Math.max(endMinutes - startMinutes, MIN_DURATION);
+  return {
+    shift,
+    dayIndex,
+    top: (startMinutes / (24 * 60)) * 100,
+    height: (heightMinutes / (24 * 60)) * 100,
+    start,
+    end,
+    editable: false,
+  };
+}
+
+function segmentStyle(segment: Segment) {
+  return {
+    top: `${segment.top}%`,
+    height: `${segment.height}%`,
+  };
+}
+
+function draftPickerStyle(segment: Segment | null) {
+  if (!segment) return {};
+  return {
+    top: `${segment.top}%`,
+  };
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener("mousemove", onDragMove);
+  window.removeEventListener("mouseup", onDragEnd);
+});
 </script>
 
 <template>
   <div class="space-y-6">
-    <div class="flex items-center justify-between">
+    <div class="flex flex-wrap items-center justify-between gap-3">
       <h2 class="text-xl font-semibold">班次管理</h2>
-      <button class="btn btn-ghost" @click="emit('refreshShifts')" :disabled="shiftBusy">
-        刷新班次
-      </button>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="join">
+          <button
+            class="btn btn-sm join-item"
+            :class="viewMode === 'list' ? 'btn-active' : ''"
+            @click="viewMode = 'list'"
+          >
+            列表
+          </button>
+          <button
+            class="btn btn-sm join-item"
+            :class="viewMode === 'day' ? 'btn-active' : ''"
+            @click="viewMode = 'day'"
+          >
+            日
+          </button>
+          <button
+            class="btn btn-sm join-item"
+            :class="viewMode === 'week' ? 'btn-active' : ''"
+            @click="viewMode = 'week'"
+          >
+            周
+          </button>
+          <button
+            class="btn btn-sm join-item"
+            :class="viewMode === 'month' ? 'btn-active' : ''"
+            @click="viewMode = 'month'"
+          >
+            月
+          </button>
+        </div>
+        <button class="btn btn-ghost btn-sm" @click="refreshCurrentView" :disabled="shiftBusy || calendarBusy">
+          刷新
+        </button>
+      </div>
     </div>
-    <div class="grid xl:grid-cols-[1fr_1.4fr] gap-6">
+
+    <div v-if="viewMode === 'list'" class="grid xl:grid-cols-[1fr_1.4fr] gap-6">
       <div class="card bg-base-100 shadow-xl border border-base-200">
         <div class="card-body space-y-4">
           <h3 class="card-title">{{ shiftForm.id ? "编辑班次" : "创建班次" }}</h3>
@@ -183,6 +963,196 @@ function setEndFromStart(hours: number) {
                 </button>
               </div>
               <div class="text-xs text-base-content/50">班次 ID: {{ shift.id }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="space-y-4">
+      <div class="card bg-base-100 shadow-xl border border-base-200">
+        <div class="card-body space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="join">
+                <button class="btn btn-sm join-item" @click="goPrev">上一{{ viewMode === 'week' ? '周' : viewMode === 'month' ? '月' : '天' }}</button>
+                <button class="btn btn-sm join-item" @click="goToday">今天</button>
+                <button class="btn btn-sm join-item" @click="goNext">下一{{ viewMode === 'week' ? '周' : viewMode === 'month' ? '月' : '天' }}</button>
+              </div>
+              <div class="text-sm font-semibold">{{ viewLabel }}</div>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <label class="cursor-pointer label justify-start gap-2">
+                <input v-model="filterEnabled" type="checkbox" class="checkbox checkbox-sm" />
+                <span class="label-text">筛选人员</span>
+              </label>
+              <select v-model="filterPersonId" class="select select-bordered select-sm" :disabled="!filterEnabled">
+                <option disabled value="">选择人员</option>
+                <option v-for="person in people" :key="person.id" :value="person.id">
+                  {{ decodeName(person.person_name_b64) }}
+                </option>
+              </select>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button class="btn btn-primary btn-sm" :disabled="!canCreateDraft" @click="createDraft">新建</button>
+              <button v-if="draft.active" class="btn btn-ghost btn-sm" @click="saveDraft">保存草稿</button>
+              <button v-if="draft.active" class="btn btn-ghost btn-sm" @click="cancelDraft">取消草稿</button>
+            </div>
+          </div>
+          <div class="text-xs text-base-content/60">
+            月视图与过去时间段只读；日/周视图支持拖动端点调整时间。
+          </div>
+          <div v-if="calendarError" class="text-xs text-error">{{ calendarError }}</div>
+          <div v-if="calendarLocalError" class="text-xs text-error">{{ calendarLocalError }}</div>
+          <div v-if="shiftError" class="text-xs text-error">{{ shiftError }}</div>
+          <div v-if="calendarMessage" class="text-xs text-success">{{ calendarMessage }}</div>
+          <div v-if="calendarLocalMessage" class="text-xs text-success">{{ calendarLocalMessage }}</div>
+          <div v-if="shiftMessage" class="text-xs text-success">{{ shiftMessage }}</div>
+
+          <div v-if="viewMode === 'month'" class="space-y-3">
+            <div class="grid grid-cols-7 text-xs text-base-content/60">
+              <div class="p-2">一</div>
+              <div class="p-2">二</div>
+              <div class="p-2">三</div>
+              <div class="p-2">四</div>
+              <div class="p-2">五</div>
+              <div class="p-2">六</div>
+              <div class="p-2">日</div>
+            </div>
+            <div class="grid grid-cols-7 gap-2">
+              <div
+                v-for="(cell, index) in monthCells"
+                :key="cell.date ? cell.date.toISOString() : index"
+                class="border border-base-200 rounded-xl min-h-[100px] p-2 bg-base-100"
+                :class="cell.inMonth ? '' : 'opacity-40'"
+              >
+                <div class="text-xs font-semibold mb-2">
+                  {{ cell.date ? cell.date.getDate() : '' }}
+                </div>
+                <div v-if="cell.date" class="space-y-1">
+                  <template v-for="shift in (monthShiftMap.get(dateKey(cell.date)) || []).slice(0, 3)" :key="shift.id">
+                    <div class="text-[10px] text-base-content/70 truncate">
+                      {{ decodeName(shift.person_name_b64) }} {{ formatTimeOnly(shift.start_at) }}
+                    </div>
+                  </template>
+                  <div
+                    v-if="(monthShiftMap.get(dateKey(cell.date)) || []).length > 3"
+                    class="text-[10px] text-base-content/50"
+                  >
+                    +{{ (monthShiftMap.get(dateKey(cell.date)) || []).length - 3 }} 条
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="border border-base-200 rounded-2xl bg-base-100 overflow-auto">
+            <div class="min-w-[640px]">
+              <div
+                class="grid text-xs text-base-content/60 border-b border-base-200"
+                :style="{ gridTemplateColumns: `72px repeat(${viewDays.length}, minmax(0, 1fr))` }"
+              >
+                <div class="p-2"></div>
+                <button
+                  v-for="(day, index) in viewDays"
+                  :key="day.toISOString()"
+                  class="p-2 text-left"
+                  :class="selectedDayIndex === index ? 'bg-base-200/60 font-semibold' : ''"
+                  @click="selectDay(index)"
+                >
+                  {{ day.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', weekday: 'short' }) }}
+                </button>
+              </div>
+              <div
+                class="grid"
+                :style="{ gridTemplateColumns: `72px repeat(${viewDays.length}, minmax(0, 1fr))` }"
+              >
+                <div class="text-[11px] text-base-content/60">
+                  <div
+                    v-for="hour in hours"
+                    :key="hour"
+                    class="flex items-start justify-end pr-2"
+                    :style="{ height: `${HOUR_HEIGHT}px` }"
+                  >
+                    {{ hour.toString().padStart(2, '0') }}:00
+                  </div>
+                </div>
+                <div
+                  v-for="(day, dayIndex) in viewDays"
+                  :key="day.toISOString()"
+                  ref="dayColumnRefs"
+                  class="relative border-l border-base-200"
+                  :style="{ height: `${HOUR_HEIGHT * 24}px` }"
+                >
+                  <div class="absolute inset-0 grid grid-rows-24 pointer-events-none">
+                    <div v-for="hour in hours" :key="hour" class="border-b border-base-200/70"></div>
+                  </div>
+                  <div
+                    v-for="segment in daySegments[dayIndex]"
+                    :key="segment.shift.id"
+                    class="absolute left-2 right-2 rounded-xl px-2 py-1 text-xs shadow-sm"
+                    :class="segment.editable ? 'bg-primary/15 border border-primary/40' : 'bg-base-200/80 border border-base-300'"
+                    :style="segmentStyle(segment)"
+                  >
+                    <div class="flex items-center justify-between text-[10px] text-base-content/70">
+                      <span>{{ formatTimeOnly(segment.start) }}</span>
+                      <span>{{ formatTimeOnly(segment.end) }}</span>
+                    </div>
+                    <div class="font-semibold truncate">{{ decodeName(segment.shift.person_name_b64) }}</div>
+                    <div class="text-[10px] text-base-content/60 truncate">
+                      {{ shortId(segment.shift.person_id) }}
+                    </div>
+                    <button
+                      v-if="segment.editable"
+                      class="absolute left-2 right-2 top-0 h-2 cursor-ns-resize"
+                      type="button"
+                      @mousedown="startDrag($event, segment, 'start')"
+                    ></button>
+                    <button
+                      v-if="segment.editable"
+                      class="absolute left-2 right-2 bottom-0 h-2 cursor-ns-resize"
+                      type="button"
+                      @mousedown="startDrag($event, segment, 'end')"
+                    ></button>
+                  </div>
+
+                  <div
+                    v-if="draft.active && draft.dayIndex === dayIndex && draftSegment"
+                    class="absolute left-2 right-2 rounded-xl px-2 py-1 text-xs bg-accent/20 border border-accent/40 shadow-sm"
+                    :style="segmentStyle(draftSegment)"
+                  >
+                    <div class="flex items-center justify-between text-[10px] text-base-content/70">
+                      <span>{{ formatTimeOnly(draft.start) }}</span>
+                      <span>{{ formatTimeOnly(draft.end) }}</span>
+                    </div>
+                    <div class="font-semibold truncate">草稿班次</div>
+                    <button
+                      class="absolute left-2 right-2 top-0 h-2 cursor-ns-resize"
+                      type="button"
+                      @mousedown="startDraftDrag($event, 'start')"
+                    ></button>
+                    <button
+                      class="absolute left-2 right-2 bottom-0 h-2 cursor-ns-resize"
+                      type="button"
+                      @mousedown="startDraftDrag($event, 'end')"
+                    ></button>
+                  </div>
+
+                  <div
+                    v-if="draft.active && draft.dayIndex === dayIndex && draftSegment"
+                    class="absolute left-full ml-2 w-40 rounded-xl border border-base-200 bg-base-100 p-2 shadow-lg"
+                    :style="draftPickerStyle(draftSegment)"
+                    @wheel.prevent="cycleDraftPerson"
+                  >
+                    <div class="text-[10px] text-base-content/50">人员（滚轮切换）</div>
+                    <select v-model="draft.person_id" class="select select-bordered select-xs w-full mt-1">
+                      <option v-for="person in people" :key="person.id" :value="person.id">
+                        {{ decodeName(person.person_name_b64) }}
+                      </option>
+                    </select>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

@@ -123,6 +123,36 @@ test("auth, user management, shifts, audit logs", async () => {
   );
   assert.equal(shift.status, 201);
 
+  const pastStart = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  const pastEnd = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+  const pastShift = await request(
+    "POST",
+    "/shifts",
+    {
+      person_id: userId,
+      start_at: pastStart,
+      end_at: pastEnd,
+    },
+    userToken
+  );
+  assert.equal(pastShift.status, 201);
+
+  const upcomingOnly = await request("GET", "/shifts", null, userToken);
+  assert.equal(upcomingOnly.status, 200);
+  assert.ok(!upcomingOnly.payload.shifts.find((item) => item.id === pastShift.payload.id));
+
+  const rangeStart = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+  const rangeEnd = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString();
+  const ranged = await request(
+    "GET",
+    `/shifts?start_at=${encodeURIComponent(rangeStart)}&end_at=${encodeURIComponent(rangeEnd)}`,
+    null,
+    userToken
+  );
+  assert.equal(ranged.status, 200);
+  assert.ok(ranged.payload.shifts.find((item) => item.id === pastShift.payload.id));
+  assert.ok(ranged.payload.shifts.find((item) => item.id === shift.payload.id));
+
   const updateStart = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
   const updateEnd = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
   const updated = await request(
@@ -186,6 +216,14 @@ test("auth, user management, shifts, audit logs", async () => {
     freshUserToken
   );
   assert.equal(deletedShift.status, 204);
+
+  const deletedPastShift = await request(
+    "DELETE",
+    `/shifts/${pastShift.payload.id}`,
+    null,
+    freshUserToken
+  );
+  assert.equal(deletedPastShift.status, 204);
 
   const deletedUser = await request("DELETE", `/users/${userId}`, null, adminToken);
   assert.equal(deletedUser.status, 204);

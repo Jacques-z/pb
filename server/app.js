@@ -177,15 +177,30 @@ function listUsers(db) {
   }));
 }
 
-function listShifts(db) {
+function listShifts(db, range) {
+  const conditions = [];
+  const params = [];
+  if (range?.startTs != null) {
+    conditions.push("s.start_ts >= ?");
+    params.push(range.startTs);
+  }
+  if (range?.endTs != null) {
+    conditions.push("s.start_ts <= ?");
+    params.push(range.endTs);
+  }
+  if (!range || (range.startTs == null && range.endTs == null)) {
+    conditions.push("s.start_ts >= ?");
+    params.push(Date.now());
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const stmt = db.prepare(`
     SELECT s.id, s.person_id, p.person_name_b64, s.start_at, s.end_at, s.created_at, s.updated_at
     FROM shifts s
     JOIN people p ON p.id = s.person_id
-    WHERE s.start_ts >= ?
+    ${whereClause}
     ORDER BY s.start_ts ASC
   `);
-  return stmt.all(Date.now());
+  return stmt.all(...params);
 }
 
 function listAuditLogs(db, limit) {
@@ -748,6 +763,22 @@ async function handleRequest(req, res, state) {
   }
 
   if (req.method === "GET" && parts.length === 1 && parts[0] === "shifts") {
+    const startParam = url.searchParams.get("start_at");
+    const endParam = url.searchParams.get("end_at");
+    if (startParam || endParam) {
+      try {
+        const startTs = startParam ? parseTimestamp(startParam).getTime() : null;
+        const endTs = endParam ? parseTimestamp(endParam).getTime() : null;
+        if (startTs != null && endTs != null && endTs < startTs) {
+          sendJson(res, 400, { error: "end_at must be after start_at" });
+          return;
+        }
+        sendJson(res, 200, { shifts: listShifts(state.db, { startTs, endTs }) });
+      } catch (err) {
+        sendJson(res, 400, { error: err.message || "invalid request" });
+      }
+      return;
+    }
     sendJson(res, 200, { shifts: listShifts(state.db) });
     return;
   }

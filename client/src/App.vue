@@ -66,6 +66,11 @@ const loginForm = reactive({
 });
 
 const shifts = ref<Shift[]>([]);
+const calendarShifts = ref<Shift[]>([]);
+const calendarError = ref<string | null>(null);
+const calendarMessage = ref<string | null>(null);
+const calendarBusy = ref(false);
+const calendarRange = ref<{ start_at: string; end_at: string } | null>(null);
 const people = ref<Person[]>([]);
 const users = ref<User[]>([]);
 const auditLogs = ref<AuditLog[]>([]);
@@ -213,6 +218,8 @@ async function hashPassword(username: string, password: string) {
 function resetMessages() {
   shiftError.value = null;
   shiftMessage.value = null;
+  calendarError.value = null;
+  calendarMessage.value = null;
   peopleError.value = null;
   peopleMessage.value = null;
   userError.value = null;
@@ -233,6 +240,8 @@ function clearSession(nextStatus = "未登录", message?: string) {
   config.isAdmin = false;
   persistConfig();
   shifts.value = [];
+  calendarShifts.value = [];
+  calendarRange.value = null;
   activeSection.value = "overview";
   setStatus(nextStatus, message);
 }
@@ -355,6 +364,40 @@ async function fetchShifts() {
   }
 }
 
+async function fetchCalendarShifts(range: { start_at: string; end_at: string }) {
+  calendarError.value = null;
+  calendarMessage.value = null;
+  if (!loggedIn.value) {
+    calendarError.value = "请先登录";
+    return;
+  }
+  calendarBusy.value = true;
+  try {
+    const params = new URLSearchParams();
+    params.set("start_at", range.start_at);
+    params.set("end_at", range.end_at);
+    const resp = await authFetch(`/shifts?${params.toString()}`);
+    const payload = await parseJsonResponse(resp);
+    if (!resp.ok) {
+      throw new Error(payload?.error || `请求失败 (${resp.status})`);
+    }
+    calendarShifts.value = payload?.shifts || [];
+    calendarMessage.value = `已加载 ${calendarShifts.value.length} 条`;
+  } catch (err) {
+    if (err instanceof Error && err.message === "登录失效") {
+      return;
+    }
+    calendarError.value = err instanceof Error ? err.message : "未知错误";
+  } finally {
+    calendarBusy.value = false;
+  }
+}
+
+function handleCalendarRangeChange(range: { start_at: string; end_at: string }) {
+  calendarRange.value = range;
+  fetchCalendarShifts(range);
+}
+
 async function fetchPeople() {
   peopleError.value = null;
   peopleMessage.value = null;
@@ -462,13 +505,53 @@ function resetShiftForm() {
   shiftForm.end_time = "";
 }
 
-async function saveShift() {
+async function submitShiftPayload(payload: {
+  id?: string;
+  person_id: string;
+  start_at: string;
+  end_at: string;
+}) {
   shiftError.value = null;
   shiftMessage.value = null;
   if (!loggedIn.value) {
     shiftError.value = "请先登录";
-    return;
+    return false;
   }
+  shiftBusy.value = true;
+  try {
+    const method = payload.id ? "PUT" : "POST";
+    const path = payload.id ? `/shifts/${payload.id}` : "/shifts";
+    const resp = await authFetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        person_id: payload.person_id,
+        start_at: payload.start_at,
+        end_at: payload.end_at,
+      }),
+    });
+    const body = await parseJsonResponse(resp);
+    if (!resp.ok) {
+      throw new Error(body?.error || `请求失败 (${resp.status})`);
+    }
+    shiftMessage.value = payload.id ? "班次已更新" : "班次已创建";
+    await fetchShifts();
+    if (calendarRange.value) {
+      await fetchCalendarShifts(calendarRange.value);
+    }
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message === "登录失效") {
+      return false;
+    }
+    shiftError.value = err instanceof Error ? err.message : "未知错误";
+    return false;
+  } finally {
+    shiftBusy.value = false;
+  }
+}
+
+async function saveShift() {
   if (!shiftForm.person_id || !shiftForm.start_date || !shiftForm.start_time || !shiftForm.end_date || !shiftForm.end_time) {
     shiftError.value = "请填写人员与开始/结束时间";
     return;
@@ -483,35 +566,24 @@ async function saveShift() {
     shiftError.value = "结束时间必须晚于开始时间";
     return;
   }
-  shiftBusy.value = true;
-  try {
-    const payload = {
-      person_id: shiftForm.person_id,
-      start_at: startDate.toISOString(),
-      end_at: endDate.toISOString(),
-    };
-    const method = shiftForm.id ? "PUT" : "POST";
-    const path = shiftForm.id ? `/shifts/${shiftForm.id}` : "/shifts";
-    const resp = await authFetch(path, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const body = await parseJsonResponse(resp);
-    if (!resp.ok) {
-      throw new Error(body?.error || `请求失败 (${resp.status})`);
-    }
-    shiftMessage.value = shiftForm.id ? "班次已更新" : "班次已创建";
+  const success = await submitShiftPayload({
+    id: shiftForm.id || undefined,
+    person_id: shiftForm.person_id,
+    start_at: startDate.toISOString(),
+    end_at: endDate.toISOString(),
+  });
+  if (success) {
     resetShiftForm();
-    await fetchShifts();
-  } catch (err) {
-    if (err instanceof Error && err.message === "登录失效") {
-      return;
-    }
-    shiftError.value = err instanceof Error ? err.message : "未知错误";
-  } finally {
-    shiftBusy.value = false;
   }
+}
+
+async function submitCalendarShift(payload: {
+  id?: string;
+  person_id: string;
+  start_at: string;
+  end_at: string;
+}) {
+  await submitShiftPayload(payload);
 }
 
 async function removeShift(shift: Shift) {
@@ -533,6 +605,9 @@ async function removeShift(shift: Shift) {
     }
     shiftMessage.value = "班次已删除";
     await fetchShifts();
+    if (calendarRange.value) {
+      await fetchCalendarShifts(calendarRange.value);
+    }
   } catch (err) {
     if (err instanceof Error && err.message === "登录失效") {
       return;
@@ -801,6 +876,9 @@ function scheduleRefresh() {
   }
   refreshTimer = window.setInterval(() => {
     fetchShifts();
+    if (calendarRange.value) {
+      fetchCalendarShifts(calendarRange.value);
+    }
   }, config.refreshMinutes * 60 * 1000);
 }
 
@@ -932,18 +1010,24 @@ onBeforeUnmount(() => {
           <ShiftsSection
             v-else-if="activeSection === 'shifts'"
             :shifts="shifts"
+            :calendar-shifts="calendarShifts"
             :people="people"
             :shift-form="shiftForm"
             :shift-error="shiftError"
             :shift-message="shiftMessage"
             :shift-busy="shiftBusy"
             :people-busy="peopleBusy"
+            :calendar-busy="calendarBusy"
+            :calendar-error="calendarError"
+            :calendar-message="calendarMessage"
             @refresh-shifts="fetchShifts"
             @refresh-people="fetchPeople"
             @save-shift="saveShift"
             @reset-shift-form="resetShiftForm"
             @edit-shift="startShiftEdit"
             @remove-shift="removeShift"
+            @calendar-range-change="handleCalendarRangeChange"
+            @calendar-submit="submitCalendarShift"
           />
 
           <PeopleSection
