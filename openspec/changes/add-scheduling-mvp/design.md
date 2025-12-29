@@ -18,8 +18,10 @@
 
 ## 决策
 - 决策：桌面端默认采用 Tauri 作为运行时。
+- 决策：前端使用 Vite + Vue + TypeScript + DaisyUI，包管理使用 pnpm。
+- 决策：服务端使用 JavaScript（Node.js），以便后续迁移到 Cloudflare Workers。
 - 决策：客户端使用可配置间隔的轮询同步，优先简单可验证。
-- 决策：默认使用嵌入式本地存储以支持本机部署与调试。
+- 决策：默认使用嵌入式 SQLite 以支持本机部署与调试，并与 D1 兼容。
 - 决策：班次时间使用带时区偏移的 RFC3339。
 - 决策：人员结构保持最小（id、person_name_b64）。
 - 决策：班次结构保持最小（id、person_id、start_at、end_at）。
