@@ -4,12 +4,17 @@
 TBD - created by archiving change add-scheduling-mvp. Update Purpose after archive.
 ## Requirements
 ### Requirement: 客户端连接配置
-客户端 MUST 允许用户配置服务端基础地址与接口令牌。
-客户端 MUST 本地持久化这些设置，并在重启后复用。
+客户端 MUST 允许用户配置服务端基础地址，并使用用户名与密码登录。
+客户端 MUST 在登录成功后保存会话令牌并用于后续接口调用。
+客户端 MUST 支持退出登录并清除本地令牌。
 
-#### Scenario: 保存连接配置
-- **当** 用户输入基础地址与令牌并保存设置
-- **则** 客户端持久化设置并用于后续接口调用
+#### Scenario: 登录并保存配置
+- **当** 用户输入基础地址、用户名与密码并登录
+- **则** 客户端持久化设置与令牌并用于后续接口调用
+
+#### Scenario: 退出登录
+- **当** 用户执行退出登录
+- **则** 客户端清除本地令牌并进入未登录状态
 
 ### Requirement: 即将到来的班次视图
 客户端 MUST 展示从服务端获取的即将到来的班次，按 start_at 升序排列。
