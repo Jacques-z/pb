@@ -14,7 +14,9 @@ TBD - created by archiving change add-scheduling-mvp. Update Purpose after archi
 - created_at（RFC3339 时间戳）
 - updated_at（RFC3339 时间戳）
 系统 MUST 在列表响应中按 start_at 升序返回班次。
-列表操作 MUST 只返回 start_at 大于或等于当前服务端时间的班次。
+当未提供查询参数时，列表操作 MUST 只返回 start_at 大于或等于当前服务端时间的班次。
+当请求携带 start_at 或 end_at 查询参数时，列表操作 MUST 返回 start_at 落在指定范围内的班次并允许返回历史班次。
+start_at 与 end_at 查询参数 MUST 为带时区偏移的 RFC3339 时间戳。
 
 #### Scenario: 创建班次
 - **当** 客户端提交包含 person_id、start_at、end_at 的有效创建请求
@@ -28,9 +30,13 @@ TBD - created by archiving change add-scheduling-mvp. Update Purpose after archi
 - **当** 客户端删除一个已存在班次
 - **则** 后续列表响应不再包含该班次
 
-#### Scenario: 获取即将到来的班次
-- **当** 客户端请求班次列表
+#### Scenario: 获取即将到来的班次（默认）
+- **当** 客户端请求班次列表且不携带范围参数
 - **则** 服务端返回 start_at 大于或等于当前时间的班次，按 start_at 升序排列
+
+#### Scenario: 获取指定时间范围
+- **当** 客户端请求班次列表并携带 start_at/end_at 范围参数
+- **则** 服务端返回该范围内的班次并允许包含过去班次
 
 ### Requirement: 班次输入字段
 创建与更新请求 MUST 包含以下字段：
