@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { AuditLog } from "../lib/types";
+import { computed } from "vue";
+import type { AuditLog, Shift } from "../lib/types";
 import { formatTime, shortId } from "../lib/format";
 
-defineProps<{
+const props = defineProps<{
   auditLogs: AuditLog[];
+  auditShiftIndex: Record<string, Shift>;
   auditLimit: number;
   auditError: string | null;
   auditMessage: string | null;
@@ -14,6 +16,38 @@ const emit = defineEmits<{
   (event: "refreshAuditLogs"): void;
   (event: "updateLimit", value: number): void;
 }>();
+
+const logMarkers = computed(() => {
+  const markers = new Map<string, { marked: boolean; label: string }>();
+  props.auditLogs.forEach((log) => {
+    markers.set(log.id, buildMarker(log));
+  });
+  return markers;
+});
+
+function buildMarker(log: AuditLog) {
+  if (log.action === "shifts.delete") {
+    return { marked: true, label: "删除" };
+  }
+  if (log.action !== "shifts.create" && log.action !== "shifts.update") {
+    return { marked: false, label: "" };
+  }
+  if (!log.resource_id) {
+    return { marked: false, label: "" };
+  }
+  const shift = props.auditShiftIndex[log.resource_id];
+  if (!shift) {
+    return { marked: false, label: "" };
+  }
+  const occurredAt = Date.parse(log.occurred_at);
+  const startAt = Date.parse(shift.start_at);
+  const endAt = Date.parse(shift.end_at);
+  if (!Number.isFinite(occurredAt) || !Number.isFinite(startAt) || !Number.isFinite(endAt)) {
+    return { marked: false, label: "" };
+  }
+  const isPast = startAt < occurredAt || endAt < occurredAt;
+  return { marked: isPast, label: "过去" };
+}
 </script>
 
 <template>
@@ -59,10 +93,22 @@ const emit = defineEmits<{
               </tr>
             </thead>
             <tbody>
-              <tr v-for="log in auditLogs" :key="log.id">
+              <tr
+                v-for="log in auditLogs"
+                :key="log.id"
+                :class="logMarkers.get(log.id)?.marked ? 'bg-error/5' : ''"
+              >
                 <td>{{ formatTime(log.occurred_at) }}</td>
                 <td>{{ log.actor_username || "--" }}</td>
-                <td>{{ log.action }}</td>
+                <td>
+                  <span>{{ log.action }}</span>
+                  <span
+                    v-if="logMarkers.get(log.id)?.marked"
+                    class="badge badge-error badge-outline ml-2"
+                  >
+                    {{ logMarkers.get(log.id)?.label }}
+                  </span>
+                </td>
                 <td>{{ log.resource_type }} · {{ shortId(log.resource_id) }}</td>
                 <td>{{ log.request_method }} {{ log.request_path }}</td>
                 <td>{{ log.status_code }}</td>

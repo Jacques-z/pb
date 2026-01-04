@@ -74,6 +74,7 @@ const calendarRange = ref<{ start_at: string; end_at: string } | null>(null);
 const people = ref<Person[]>([]);
 const users = ref<User[]>([]);
 const auditLogs = ref<AuditLog[]>([]);
+const auditShiftIndex = ref<Record<string, Shift>>({});
 
 const status = ref("未登录");
 const lastUpdated = ref("--");
@@ -242,6 +243,8 @@ function clearSession(nextStatus = "未登录", message?: string) {
   shifts.value = [];
   calendarShifts.value = [];
   calendarRange.value = null;
+  auditLogs.value = [];
+  auditShiftIndex.value = {};
   activeSection.value = "overview";
   setStatus(nextStatus, message);
 }
@@ -468,6 +471,12 @@ async function fetchAuditLogs() {
     }
     auditLogs.value = payload?.logs || [];
     auditMessage.value = `已加载 ${auditLogs.value.length} 条日志`;
+    try {
+      await refreshAuditShiftIndex(auditLogs.value);
+    } catch (err) {
+      auditShiftIndex.value = {};
+      auditMessage.value = `已加载 ${auditLogs.value.length} 条日志（班次标记数据加载失败）`;
+    }
   } catch (err) {
     if (err instanceof Error && err.message === "登录失效") {
       return;
@@ -476,6 +485,27 @@ async function fetchAuditLogs() {
   } finally {
     auditBusy.value = false;
   }
+}
+
+async function refreshAuditShiftIndex(logs: AuditLog[]) {
+  const needsShifts = logs.some((log) => log.action.startsWith("shifts."));
+  if (!needsShifts) {
+    auditShiftIndex.value = {};
+    return;
+  }
+  const params = new URLSearchParams();
+  params.set("start_at", "1970-01-01T00:00:00.000Z");
+  params.set("end_at", "2100-01-01T00:00:00.000Z");
+  const resp = await authFetch(`/shifts?${params.toString()}`);
+  const payload = await parseJsonResponse(resp);
+  if (!resp.ok) {
+    throw new Error(payload?.error || `请求失败 (${resp.status})`);
+  }
+  const nextIndex: Record<string, Shift> = {};
+  (payload?.shifts || []).forEach((shift: Shift) => {
+    nextIndex[shift.id] = shift;
+  });
+  auditShiftIndex.value = nextIndex;
 }
 
 function setAuditLimit(value: number) {
@@ -1059,6 +1089,7 @@ onBeforeUnmount(() => {
           <AuditSection
             v-else-if="activeSection === 'audit'"
             :audit-logs="auditLogs"
+            :audit-shift-index="auditShiftIndex"
             :audit-limit="auditLimit"
             :audit-error="auditError"
             :audit-message="auditMessage"

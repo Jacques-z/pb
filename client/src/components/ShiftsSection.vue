@@ -132,7 +132,7 @@ const canCreateDraft = computed(() => {
   }
   const range = viewRange.value;
   if (!range) return false;
-  return range.end.getTime() > Date.now();
+  return true;
 });
 
 const filteredCalendarShifts = computed(() => {
@@ -268,7 +268,7 @@ const radialSegments = computed(() => {
     if (endMinutesRaw <= 0) return;
     const startMinutes = Math.max(0, startMinutesRaw);
     const endMinutes = Math.max(startMinutes + MIN_DURATION, endMinutesRaw);
-    const editable = isDraft ? true : isEditableShift(shift);
+    const editable = isDraft ? true : isEditableShift();
     const startRing = Math.floor(startMinutes / RING_MINUTES);
     const endRing = Math.floor((endMinutes - 1) / RING_MINUTES);
     for (let ring = startRing; ring <= endRing; ring += 1) {
@@ -305,7 +305,7 @@ const radialHandles = computed(() => {
     shiftList.push({ shift: draftValue, isDraft: true });
   }
   shiftList.forEach(({ shift, isDraft }) => {
-    const editable = isDraft ? true : isEditableShift(shift);
+    const editable = isDraft ? true : isEditableShift();
     if (!editable) return;
     const times = isDraft
       ? { start: new Date(shift.start_at), end: new Date(shift.end_at) }
@@ -659,23 +659,18 @@ function applyTimeToDay(day: Date, source: Date) {
 function moveDraftToDay(day: Date) {
   const dayStart = startOfDay(day);
   const dayEnd = addDays(dayStart, 1);
-  const now = new Date();
-  if (dayEnd <= now) {
-    cancelDraftWithError("过去时间段只读，草稿已取消");
-    return false;
-  }
   const durationMs = Math.max(
     draft.end.getTime() - draft.start.getTime(),
     MIN_DURATION * 60 * 1000
   );
   let start = applyTimeToDay(day, draft.start);
-  const minStart = addMinutes(dayStart, getMinNowMinutes(dayStart));
+  const minStart = dayStart;
   const maxStart = addMinutes(dayStart, 24 * 60 - MIN_DURATION);
   if (start < minStart) {
     start = minStart;
   }
   if (start > maxStart) {
-    cancelDraftWithError("过去时间段只读，草稿已取消");
+    cancelDraftWithError("草稿超出日期范围，已取消");
     return false;
   }
   let end = new Date(start.getTime() + durationMs);
@@ -685,7 +680,7 @@ function moveDraftToDay(day: Date) {
     if (end < minEnd) {
       const adjustedStart = new Date(dayEnd.getTime() - MIN_DURATION * 60 * 1000);
       if (adjustedStart < minStart) {
-        cancelDraftWithError("过去时间段只读，草稿已取消");
+        cancelDraftWithError("草稿超出日期范围，已取消");
         return false;
       }
       start = adjustedStart;
@@ -715,19 +710,15 @@ function createDraft() {
   const dayStart = startOfDay(day);
   const dayEnd = addDays(dayStart, 1);
   const now = new Date();
-  if (dayEnd <= now) {
-    calendarLocalError.value = "过去时间段只读";
-    return;
-  }
-  let start = dayStart;
+  let start = new Date(dayStart.getTime() + 9 * 60 * 60 * 1000);
   if (now > dayStart && now < dayEnd) {
     start = roundToStep(now);
-  } else {
-    start = new Date(dayStart.getTime() + 9 * 60 * 60 * 1000);
+    if (start >= dayEnd) {
+      start = new Date(dayStart.getTime() + 9 * 60 * 60 * 1000);
+    }
   }
   if (start >= dayEnd) {
-    calendarLocalError.value = "该日期已过期";
-    return;
+    start = dayStart;
   }
   let end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
   if (end > dayEnd) {
@@ -982,10 +973,6 @@ function applyMinutesToDraft(dayIndex: number, minutes: number, edge: "start" | 
   if (!day) return null;
   const dayStart = startOfDay(day);
   const target = addMinutes(dayStart, minutes);
-  const now = new Date();
-  if (target.getTime() < now.getTime()) {
-    return null;
-  }
   let start = new Date(draft.start);
   let end = new Date(draft.end);
   if (edge === "start") {
@@ -999,9 +986,6 @@ function applyMinutesToDraft(dayIndex: number, minutes: number, edge: "start" | 
       start = addMinutes(end, -MIN_DURATION);
     }
   }
-  if (start.getTime() < now.getTime()) {
-    return null;
-  }
   return { start, end };
 }
 
@@ -1012,10 +996,6 @@ function applyMinutesToShift(shift: Shift, dayIndex: number, minutes: number, ed
   const originalEnd = new Date(shift.end_at);
   const dayStart = startOfDay(day);
   const target = addMinutes(dayStart, minutes);
-  const now = new Date();
-  if (target.getTime() < now.getTime()) {
-    return null;
-  }
   let start = new Date(originalStart);
   let end = new Date(originalEnd);
   if (edge === "start") {
@@ -1029,19 +1009,7 @@ function applyMinutesToShift(shift: Shift, dayIndex: number, minutes: number, ed
       start = addMinutes(end, -MIN_DURATION);
     }
   }
-  if (start.getTime() < now.getTime()) {
-    return null;
-  }
   return { start, end };
-}
-
-function getMinNowMinutes(dayStart: Date) {
-  const now = new Date();
-  if (!isSameDay(now, dayStart)) {
-    return 0;
-  }
-  const diff = now.getTime() - dayStart.getTime();
-  return Math.max(0, Math.ceil(diff / (MINUTE_STEP * 60 * 1000)) * MINUTE_STEP);
 }
 
 function addMinutes(date: Date, minutes: number) {
@@ -1056,11 +1024,10 @@ function getShiftTimes(shift: Shift) {
   return { start: new Date(shift.start_at), end: new Date(shift.end_at) };
 }
 
-function isEditableShift(shift: Shift) {
-  const { start } = getShiftTimes(shift);
+function isEditableShift() {
   if (viewMode.value === "month") return false;
   if (viewMode.value === "list") return false;
-  return start.getTime() >= Date.now();
+  return true;
 }
 
 type Segment = {
@@ -1120,7 +1087,7 @@ function buildSegmentsForDay(day: Date, dayIndex: number) {
     const segmentStart = start < dayStart ? dayStart : start;
     const segmentEnd = end > dayEnd ? dayEnd : end;
     const segment = buildSegment(day, dayIndex, shift, segmentStart, segmentEnd);
-    segment.editable = isDraft ? true : isEditableShift(shift);
+    segment.editable = isDraft ? true : isEditableShift();
     segment.handleStart = isSameDay(start, day);
     segment.handleEnd = isSameDay(end, day);
     segment.isDraft = isDraft;
@@ -1382,7 +1349,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="text-xs text-base-content/60">
-            月视图与过去时间段只读；日/周视图支持拖动端点调整时间。
+            月视图只读；日/周视图支持拖动端点调整时间与删除。
           </div>
           <div v-if="calendarError" class="text-xs text-error">{{ calendarError }}</div>
           <div v-if="calendarLocalError" class="text-xs text-error">{{ calendarLocalError }}</div>
@@ -1512,13 +1479,22 @@ onBeforeUnmount(() => {
                   class="rounded-xl border border-base-200 bg-base-100 p-3 text-xs space-y-1"
                 >
                   <div class="font-semibold">{{ decodeName(shift.person_name_b64) }}</div>
-                  <div class="text-base-content/70">
-                    {{
-                      formatTimeLabel(new Date(shift.start_at), true)
-                    }} →
-                    {{
-                      formatTimeLabel(new Date(shift.end_at), true)
-                    }}
+                  <div class="flex flex-wrap items-center gap-2 text-base-content/70">
+                    <span>
+                      {{
+                        formatTimeLabel(new Date(shift.start_at), true)
+                      }} →
+                      {{
+                        formatTimeLabel(new Date(shift.end_at), true)
+                      }}
+                    </span>
+                    <button
+                      class="btn btn-xs btn-error btn-outline"
+                      type="button"
+                      @click="emit('removeShift', shift)"
+                    >
+                      删除
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1583,6 +1559,14 @@ onBeforeUnmount(() => {
                     <div class="text-[10px] text-base-content/60 truncate">
                       {{ segment.isDraft ? decodeName(segment.shift.person_name_b64) : shortId(segment.shift.person_id) }}
                     </div>
+                    <button
+                      v-if="!segment.isDraft"
+                      class="absolute right-1 top-1 btn btn-ghost btn-xs text-error"
+                      type="button"
+                      @click.stop="emit('removeShift', segment.shift)"
+                    >
+                      删除
+                    </button>
                     <button
                       v-if="segment.editable && segment.handleStart"
                       class="absolute left-2 right-2 top-0 h-2 cursor-ns-resize"
