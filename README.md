@@ -69,6 +69,23 @@ pnpm install
 pnpm tauri dev
 ```
 
+## Android 客户端
+使用 Tauri 打包现有前端，需准备 Android SDK/NDK、Java 17 与 Rust Android target。
+
+```bash
+cd client
+pnpm install
+pnpm tauri android init
+pnpm tauri android dev
+```
+
+调试 APK 构建示例：
+```bash
+pnpm tauri android build -d --apk --split-per-abi
+```
+
+创建 tag（如 `v0.1.0`）后，GitHub Actions 会打包调试版 APK 并发布到 Release 附件中。
+
 ### 管理控制台
 客户端内置管理控制台，可在左侧导航切换模块：
 - 班次管理：列表与日/周/月视图，月视图与过去时间段只读，支持拖动端点调整时间

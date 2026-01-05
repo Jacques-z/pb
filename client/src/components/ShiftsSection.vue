@@ -444,12 +444,6 @@ function formatTimeLabel(date: Date, includeDate: boolean) {
   return `${formatDate(date)} ${time}`;
 }
 
-function isCrossDayShift(shift: Shift) {
-  const start = new Date(shift.start_at);
-  const end = new Date(shift.end_at);
-  return !isSameDay(start, end);
-}
-
 function getRadialLayout(size: number, ringCount: number) {
   const rings = Math.max(1, ringCount);
   const padding = 14;
@@ -781,15 +775,6 @@ function startDrag(event: MouseEvent, segment: Segment, edge: "start" | "end") {
   };
   window.addEventListener("mousemove", onDragMove);
   window.addEventListener("mouseup", onDragEnd);
-}
-
-function startRadialDrag(event: MouseEvent, handle: RadialHandle) {
-  if (!handle.editable) return;
-  const shift = handle.isDraft
-    ? draftShift.value
-    : filteredCalendarShifts.value.find((item) => item.id === handle.shiftId);
-  if (!shift) return;
-  beginRadialDrag(event, shift, handle.isDraft, handle.edge);
 }
 
 function startRadialSegmentDrag(event: MouseEvent, segment: RadialSegment) {

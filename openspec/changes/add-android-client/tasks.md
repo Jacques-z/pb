@@ -1,10 +1,10 @@
 # Tasks
 
 ## 1. 规格与设计
-- [ ] 1.1 新增 android-client 规格
-- [ ] 1.2 修改 manage-console-ui 的管理控制台入口描述
-- [ ] 1.3 补充 Android 端后台提醒与权限策略设计
-- [ ] 1.4 新增 android-packaging 规格并补充 CI 打包策略设计
+- [x] 1.1 新增 android-client 规格
+- [x] 1.2 修改 manage-console-ui 的管理控制台入口描述
+- [x] 1.3 补充 Android 端后台提醒与权限策略设计
+- [x] 1.4 新增 android-packaging 规格并补充 CI 打包策略设计
 
 ## 2. Android 客户端实现
 - [ ] 2.1 建立 Android 构建与打包流程（Tauri）
@@ -18,8 +18,8 @@
 - [ ] 3.3 班次变更时更新与取消提醒
 
 ## 4. CI 打包
-- [ ] 4.1 配置 tag 触发的 GitHub Actions 打包调试 APK
-- [ ] 4.2 将 APK 作为 Release 附件发布
+- [x] 4.1 配置 tag 触发的 GitHub Actions 打包调试 APK
+- [x] 4.2 将 APK 作为 Release 附件发布
 
 ## 5. 验证
 - [ ] 5.1 Android 冒烟：登录与即将班次展示

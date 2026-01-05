@@ -1,0 +1,181 @@
+name: Tauri Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "V*"
+
+permissions:
+  contents: write
+env:
+  RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+jobs:
+  test:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check GITHUB_TOKEN write access
+        run: |
+          token="${RELEASE_TOKEN:-$GITHUB_TOKEN}"
+          code=$(curl -s -o /tmp/permcheck.out -w "%{http_code}" \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github+json" \
+            -X POST \
+            https://api.github.com/repos/${{ github.repository }}/releases/generate-notes \
+            -d '{"tag_name":"permcheck","target_commitish":"'"${GITHUB_SHA}"'"}')
+          if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+            echo "GITHUB_TOKEN cannot write releases (HTTP $code)"
+            cat /tmp/permcheck.out || true
+            exit 1
+          fi
+          echo "Token check HTTP $code (401/403 would fail)"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+  android:
+    name: Android (APK)
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAURI_ANDROID_ABIS: arm64-v8a
+      # Strip symbols in debug build to shrink APK while keeping debug keystore
+      RUSTFLAGS: "-C strip=symbols"
+      CARGO_PROFILE_DEV_DEBUG: "false"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/lib/android/sdk/system-images || true
+          sudo rm -rf /usr/local/lib/android/sdk/emulator || true
+          sudo find /usr/local/lib/android/sdk/build-tools -maxdepth 1 -type d ! -name '34.0.0' -exec rm -rf {} + || true
+          sudo find /usr/local/lib/android/sdk/platforms -maxdepth 1 -type d ! -name 'android-34' -exec rm -rf {} + || true
+          sudo docker system prune -af || true
+          df -h
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install Rust (Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager "cmdline-tools;latest" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          yes | sdkmanager --licenses
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Bridge NDK_HOME for Tauri
+        run: |
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}" >> $GITHUB_ENV
+          echo "NDK_HOME=${ANDROID_NDK_HOME}" >> $GITHUB_ENV
+          echo "Exported NDK_HOME -> $NDK_HOME"
+
+      - name: Add NDK toolchains to PATH
+        run: echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Print Tauri info
+        run: pnpm tauri info || true
+
+      - name: Force clean android gen dir
+        run: rm -rf src-tauri/gen/android || true
+
+      - name: Init Tauri Android project (verbose)
+        run: pnpm tauri android init -vv
+
+      - name: Verify android project exists
+        run: |
+          echo "***"
+          echo "Listing src-tauri and gen:"
+          ls -la src-tauri || true
+          ls -la src-tauri/gen || true
+          if [ ! -d "src-tauri/gen/android" ]; then
+            echo "::error ::Android project not generated. Check init logs above (NDK_HOME/SDK)."
+            exit 1
+          fi
+
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x src-tauri/gen/android/gradlew || true
+
+      - name: Disk usage before Android build
+        run: df -h
+
+      - name: Build Tauri Android (Debug, split per ABI)
+        run: pnpm tauri android build -d --apk true --split-per-abi
+
+      - name: Disk usage after Android build
+        run: df -h
+
+      - name: List APK outputs
+        run: ls -lR src-tauri/gen/android/app/build/outputs/apk || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-android-apk
+          path: |
+            client/src-tauri/gen/android/app/build/outputs/apk/**/app-*-debug*.apk
+          if-no-files-found: warn
+
+      - name: Attach APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ env.RELEASE_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            client/src-tauri/gen/android/app/build/outputs/apk/**/app-*-debug*.apk
